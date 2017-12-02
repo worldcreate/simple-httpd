@@ -1,0 +1,6 @@
+[package]
+name = "simple-httpd"
+version = "0.1.0"
+authors = ["worldcreate <furatsuki_fiskm@yahoo.co.jp>"]
+
+[dependencies]
