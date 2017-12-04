@@ -2,9 +2,10 @@ use std::str;
 use std::thread;
 use std::error::Error;
 use std::fs::File;
-use std::io::{Read, Write};
+use std::path::PathBuf;
+use std::io;
+use std::io::{Write, BufRead};
 use std::net::{TcpListener, TcpStream};
-use std::path::Path;
 
 fn main() {
     let listener = TcpListener::bind("127.0.0.1:8080").unwrap();
@@ -22,67 +23,51 @@ fn main() {
     }
 }
 
-fn handle_client(mut stream: TcpStream) {
-    let mut buf;
+fn handle_client(stream: TcpStream) {
+    // バッファリングを行うため BufReader を用いる
+    let mut stream = io::BufReader::new(stream);
 
-    loop {
-        buf = [0; 1024];
+    // stream から最初の一行を読み取る
+    let mut first_line = String::new();
+    if let Err(err) = stream.read_line(&mut first_line) {
+        panic!("error during receive a line: {}", err);
+    }
 
-        let _ = match stream.read(&mut buf) {
-            Err(e) => panic!("Got an error: {}", e),
-            Ok(m) => {
-                if m == 0 {
-                    // EOF
-                    break;
-                }
-                m
-            },
-        };
-
-        let line = str::from_utf8(&buf).unwrap();
-        let first_line = line.lines().nth(0);
-        println!("{}", first_line.unwrap());
-        let mut params = first_line.unwrap().split_whitespace();
-
-        match params.next().unwrap() {
-            "GET" => {
-                get_operation(params.next().unwrap(), &stream);
-            },
-            _ => {}
+    // unwrap() をなくしたかったのでパターンマッチで直接値を取り出すようにした
+    let mut params = first_line.split_whitespace();
+    let method = params.next();
+    let path = params.next();
+    match (method, path) {
+        (Some("GET"), Some(file_path)) => {
+            // BufReader が所有権を持っていくため，get_mut() で内部の（可変）参照を受け取る
+            get_operation(file_path, stream.get_mut());
         }
-
+        _ => panic!("failed to parse"),
     }
 }
 
-fn get_operation(file_name: &str, mut stream: &TcpStream) {
-    let file_path = format!("./www{}", file_name).to_string();
-    let path = Path::new(&file_path);
-    let display = path.display();
+fn get_operation(file_name: &str, stream: &mut TcpStream) {
+    // パスの構築を少しだけスマートにした
+    let path = PathBuf::from(format!("./www{}", file_name));
     let mut file = match File::open(&path) {
-        Err(why) => panic!("couldn't open {}: {}", display, Error::description(&why)),
+        Err(why) => {
+            panic!(
+                "couldn't open {}: {}",
+                path.display(),
+                Error::description(&why)
+            )
+        }
         Ok(file) => file,
     };
-    stream.write("HTTP/1.1 200 OK\n".as_bytes()).unwrap();
-    stream.write("Content-Type: text/html; charset=UTF-8\n".as_bytes()).unwrap();
-    stream.write(format!("Content-Length: {}\n", file.metadata().unwrap().len()).as_bytes()).unwrap();
-    stream.write("\n".as_bytes()).unwrap();
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
 
-    let mut file_buf;
-    loop {
-        file_buf = [0; 1024];
+    // 直接 write() を呼び出さず write!() マクロを用いた
+    writeln!(stream, "HTTP/1.1 200 OK").unwrap();
+    writeln!(stream, "Content-Type: text/html; charset=UTF-8").unwrap();
+    writeln!(stream, "Content-Length: {}", len).unwrap();
+    writeln!(stream).unwrap();
 
-        let _ = match file.read(&mut file_buf) {
-            Err(e) => panic!("{}", e),
-            Ok(m) => {
-                if m == 0 {
-                    break;
-                }
-                m
-            },
-        };
-
-        stream.write(&file_buf).unwrap();
-    }
-
-    println!("{:?}", path);
+    // file -> stream
+    // ファイルを読み込むための追加のバッファが必要ない点に注意
+    io::copy(&mut file, stream).unwrap();
 }
